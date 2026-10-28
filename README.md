@@ -45,6 +45,12 @@ IDEA analyses Python more deeply, so "ready" doesn't mean the same work on
 both sides. Both are measured from the outside, the same way: see
 [`perf/compare`](perf/compare) to run it on your machine and projects.
 
+## Compare revisions
+
+In the Git Log, select two commits with Cmd/Ctrl-click, then choose **Compare Versions**
+from the context menu. Both revision panes support selecting and copying text with
+the mouse or keyboard; revision contents remain read-only.
+
 ## Build
 
 ```sh
