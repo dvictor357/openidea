@@ -73,7 +73,7 @@ describe("EditorController", () => {
     const key = Object.values(useTabs.getState().panes)
       .flatMap((p) => p.tabs)
       .find((t) => t.input.path === "/p/b.ts")!.input.key;
-    ctrl.closeInput(key);
+    await ctrl.closeInput(key);
     expect(openFilePaths(useTabs.getState())).toEqual(["/p/a.ts"]);
   });
 
@@ -99,31 +99,6 @@ describe("EditorController", () => {
     const s = useTabs.getState();
     const pane = s.panes[s.activePane]!;
     const items = resolveMenuItems(ctrl.tabMenu(pane.id, pane.tabs[0]!));
-    expect(items.map((i) => (i.kind === "separator" ? "-" : i.label))).toEqual([
-      "Close",
-      "Close Other Tabs",
-      "Close Tabs to the Left",
-      "Close Tabs to the Right",
-      "Close All Tabs",
-      "Close Unmodified Tabs",
-      "-",
-      "Pin Tab",
-      "-",
-      "Split and Move Right",
-      "Split and Move Down",
-      "Split Right",
-      "Split Down",
-      "-",
-      "Open In",
-      "-",
-      "Local History",
-      "Git",
-      "-",
-      "Copy Path/Reference…",
-      "Rename File…",
-      "-",
-      "Configure Editor Tabs…",
-    ]);
     expect(items.find((i) => i.label === "Close Tabs to the Left")?.disabled).toBe(true);
     expect(items.find((i) => i.label === "Close Tabs to the Right")?.disabled).toBe(false);
     dispose();

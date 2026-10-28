@@ -45,6 +45,21 @@ IDEA analyses Python more deeply, so "ready" doesn't mean the same work on
 both sides. Both are measured from the outside, the same way: see
 [`perf/compare`](perf/compare) to run it on your machine and projects.
 
+## Jupyter notebooks
+
+Open `.ipynb` files as virtualized Markdown, Python and raw cells, with stored outputs.
+Use **Run Cell** or **Run All**, choose a Python interpreter, and interrupt or restart
+the notebook's persistent local kernel from the toolbar. The selected environment
+needs `ipykernel` (`python -m pip install ipykernel`); no Jupyter server is required.
+Opening or saving a notebook never runs its cells.
+
+Save, undo/redo, split editors and unsaved-change prompts share one notebook document.
+An unchanged notebook saves byte-for-byte, including its original formatting and
+unknown fields; external file changes are reported rather than overwritten.
+Text, tracebacks and images render inline. HTML tables use an isolated static sandbox;
+JavaScript remains inert. Remote kernels, interactive widgets and notebook LSP/debugging
+are not supported.
+
 ## Build
 
 ```sh
@@ -53,6 +68,15 @@ pnpm tauri dev
 ```
 
 Rust 1.96, Node 22, pnpm and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/).
+
+Native notebook execution tests are opt-in and need two distinct Python environments
+with `ipykernel` installed:
+
+```sh
+OPENIDEA_TEST_PYTHON=/first/env/bin/python \
+OPENIDEA_TEST_PYTHON_SECOND=/second/env/bin/python \
+cargo test -p ide-notebook --test kernel_runtime -- --ignored --test-threads=1
+```
 
 ## License
 

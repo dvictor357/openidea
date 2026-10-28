@@ -690,16 +690,18 @@ export function registerEditorActions(): () => void {
       category: "Window",
       icon: "close",
       when: "(editorTabsOpen || editorSplit) && !toolWindowFocus",
-      run: () => ctrl.closeActiveTab(),
+      run: async () => {
+        await ctrl.closeActiveTab();
+      },
     },
     {
       id: "editor.closeOtherTabs",
       title: "Close Other Tabs",
       category: "Window",
       when: TABS_WHEN,
-      run: () => {
+      run: async () => {
         const t = activePaneTab();
-        if (t) ctrl.closeOthers(t.paneId, t.tabId);
+        if (t) await ctrl.closeOthers(t.paneId, t.tabId);
       },
     },
     {
@@ -707,7 +709,9 @@ export function registerEditorActions(): () => void {
       title: "Close All Tabs",
       category: "Window",
       when: "editorTabsOpen",
-      run: () => ctrl.closeEverything(),
+      run: async () => {
+        await ctrl.closeEverything();
+      },
     },
     {
       id: "editor.pinTab",
@@ -765,7 +769,9 @@ export function registerEditorActions(): () => void {
       title: "Unsplit",
       category: "Window",
       when: "editorSplit",
-      run: () => ctrl.unsplit(useTabs.getState().activePane),
+      run: async () => {
+        await ctrl.unsplit(useTabs.getState().activePane);
+      },
     },
     {
       id: "editor.copyPath",

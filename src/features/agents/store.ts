@@ -148,7 +148,7 @@ export async function connect(): Promise<void> {
   for (const t of editors.openTabs?.() ?? []) {
     const task = (t.input.data as { task?: string } | undefined)?.task;
     if (t.input.kind === SESSION_KIND && task && !useAgents.getState().tasks.has(task))
-      editors.closeInput?.(t.input.key);
+      await editors.closeInput?.(t.input.key);
   }
 }
 
@@ -176,7 +176,7 @@ function onEvent(e: AgentEvent) {
       const composers = new Map(s.composers);
       composers.delete(e.id);
       useAgents.setState({ tasks, composers });
-      editorService().closeInput?.(sessionKey(e.id));
+      void editorService().closeInput?.(sessionKey(e.id));
       break;
     }
     case "entry": {
@@ -308,8 +308,7 @@ export async function startTask(): Promise<void> {
   }));
   remember(composer.text.trim());
   updateComposer(HOME, emptyDraft());
-  editorService().closeInput?.(HOME_KEY);
-  openTask(task.id);
+  if ((await editorService().closeInput?.(HOME_KEY)) !== false) openTask(task.id);
 }
 
 function remember(text: string) {

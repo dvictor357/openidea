@@ -116,11 +116,14 @@ pub fn run() {
         .build(context)
         .expect("error while running OpenIDEA")
         .run(|app, event| {
-            // Quit after installing an update (`app_install_update`): relaunch.
-            if let tauri::RunEvent::Exit = event
-                && app.try_state::<WindowsState>().is_some_and(|w| w.restart_requested())
-            {
-                tauri::process::restart(&app.env());
+            if let tauri::RunEvent::Exit = event {
+                if let Some(state) = app.try_state::<AppState>() {
+                    state.host.shutdown_notebooks_on_exit();
+                }
+                // Cleanup must finish before update/restart replaces this process.
+                if app.try_state::<WindowsState>().is_some_and(|w| w.restart_requested()) {
+                    tauri::process::restart(&app.env());
+                }
             }
         });
 }

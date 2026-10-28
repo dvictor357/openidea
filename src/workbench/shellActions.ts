@@ -8,6 +8,7 @@ import { notify } from "./notificationStore";
 import { NOTIFICATIONS_TOOL_WINDOW } from "./Notifications";
 import { activateToolWindow } from "./toolwindows/store";
 import { toggleTheme } from "./theme";
+import { maybeEditorService } from "./contributions";
 
 export async function openProjectDialog() {
   if (!isTauri()) {
@@ -28,6 +29,7 @@ export async function openProjectDialog() {
     await executeAction("file.openProjectPath", path);
     return;
   }
+  if (!(await confirmLeaveProject())) return;
   try {
     await openProject(path);
   } catch (e) {
@@ -52,7 +54,13 @@ export function registerShellActions(): () => void {
       category: "File",
       when: "projectOpen",
       run: async () => {
-        if (useProject.getState().project && (await confirmLeaveProject())) await closeProject();
+        if (!useProject.getState().project || !(await confirmLeaveProject())) return;
+        try {
+          await closeProject();
+        } catch (e) {
+          maybeEditorService()?.cancelClose?.();
+          throw e;
+        }
       },
     },
     {
