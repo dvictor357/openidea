@@ -102,7 +102,7 @@ export const viewerTheme = EditorView.theme(
     ".cm-scroller": { fontFamily: "var(--font-mono)", fontWeight: "var(--fw-code, 400)", lineHeight: "var(--lh-code)" },
     ".cm-content": { caretColor: "var(--accent)", WebkitUserSelect: "text", userSelect: "text" },
     ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--accent)" },
-    "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, ::selection": {
+    "&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, .cm-selectionBackground, ::selection": {
       backgroundColor: "var(--bg-selected-strong)",
     },
     ".cm-activeLine": { backgroundColor: "var(--bg-current-line)" },
