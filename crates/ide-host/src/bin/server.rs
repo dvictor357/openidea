@@ -66,6 +66,8 @@ async fn run(base: PathBuf) -> i32 {
     tracing::info!("openidea-server {} ready", env!("CARGO_PKG_VERSION"));
     rpc::serve(host.clone(), Dispatcher::standard(), peer, tokio::io::stdin(), tokio::io::stdout()).await;
     // `process::exit` skips destructors: nothing started for the client may outlive it.
-    host.shutdown().await;
+    if tokio::time::timeout(std::time::Duration::from_secs(10), host.shutdown()).await.is_err() {
+        tracing::warn!("language servers did not shut down in time");
+    }
     0
 }

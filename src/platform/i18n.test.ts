@@ -164,6 +164,13 @@ describe("t / locales", () => {
 describe("catalogs", () => {
   const catalogs: Record<string, Record<string, string>> = { en, zh };
 
+  it("translate source text into non-empty, different text", () => {
+    for (const [source, text] of Object.entries(zhText as Record<string, string>)) {
+      expect(text.trim(), source).not.toBe("");
+      expect(text, source).not.toBe(source);
+    }
+  });
+
   it("keep the placeholders of source-text templates", () => {
     const names = (m: string) => [...m.matchAll(/\{(\w+)\}/g)].map((x) => x[1]).sort();
     for (const [source, text] of Object.entries(zhText as Record<string, string>))

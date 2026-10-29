@@ -10,34 +10,11 @@
 import { commands, isTauri, onIdeEvent, type Settings } from "@/platform/ipc";
 import { t } from "@/platform/i18n";
 import { closeProject, provideLeaveProjectGuard, useProject } from "@/platform/project";
-import {
-  maybeEditorService,
-  notifications,
-  useContributions,
-  type EditorCloseSession,
-} from "@/workbench/contributions";
+import { maybeEditorService, notifications, type EditorCloseSession } from "@/workbench/contributions";
 import { ask, type Ask } from "@/workbench/messages";
 
 /** Document ids the backend reports dirty in this window. */
 const dirtyDocs = new Set<number>();
-
-export function dirtyCount(): number {
-  const kinds = useContributions.getState().editorKinds;
-  const seen = new Set<string>();
-  let count = dirtyDocs.size;
-  for (const tab of maybeEditorService()?.openTabs?.() ?? []) {
-    if (seen.has(tab.input.key)) continue;
-    seen.add(tab.input.key);
-    const lifecycle = kinds.get(tab.input.kind)?.document;
-    if (!lifecycle) continue;
-    try {
-      if (lifecycle.isDirty(tab.input)) count++;
-    } catch {
-      count++;
-    }
-  }
-  return count;
-}
 
 export function confirmExitEnabled(settings: Settings | null | undefined): boolean {
   return settings?.general?.confirmExit === true;

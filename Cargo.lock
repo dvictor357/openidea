@@ -4326,7 +4326,7 @@ dependencies = [
 
 [[package]]
 name = "ide-notebook"
-version = "0.1.24"
+version = "0.1.25"
 dependencies = [
  "futures",
  "ide-core",
