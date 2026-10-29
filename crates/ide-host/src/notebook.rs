@@ -258,9 +258,17 @@ impl NotebookService {
         result
     }
 
+    /// Frontend disposal may arrive after project replacement has already retired this id.
     pub async fn close(&self, id: &str) -> IdeResult<()> {
-        let document = self.resolve(id)?;
+        let document = match self.resolve(id) {
+            Ok(document) => document,
+            Err(error) if error.kind == ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
         let _control = document.control.lock().await;
+        if document.state.lock().closed {
+            return Ok(());
+        }
         let batch = invalidate(&document)?;
         let result = async {
             let _ = self.kernels.interrupt(&document.path).await;
@@ -560,10 +568,32 @@ mod tests {
         assert_ne!(reopened.id, initial.id);
         assert_eq!(service.get(&initial.id).unwrap_err().kind, ErrorKind::NotFound);
         // A delayed old-incarnation close cannot dispose a new session at that path.
-        assert!(service.close(&initial.id).await.is_err());
+        service.close(&initial.id).await.unwrap();
         assert_eq!(service.get(&reopened.id).unwrap().id, reopened.id);
         service.shutdown().await;
         other.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_close_keeps_the_incarnation_recoverable_until_a_retry_succeeds() {
+        let (dir, service, initial) = fixture();
+        // A batch that never drains models a kernel that ignores interrupt and shutdown.
+        let admission =
+            service.admit(&initial.id, vec![initial.cells[0].id.clone()], CancellationToken::new()).unwrap();
+        let error = service.close(&initial.id).await.unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Unavailable);
+        assert!(admission.guard.batch.cancel.is_cancelled());
+        // The backend still owns the incarnation: a reopen shares it instead of
+        // starting a second kernel, and the failed close left it usable.
+        let reopened = service.open(&dir.path().join("session.ipynb")).unwrap();
+        assert_eq!(reopened.id, initial.id);
+        assert!(matches!(service.admit(&initial.id, vec![initial.cells[0].id.clone()], CancellationToken::new()),
+            Err(error) if error.kind == ErrorKind::Unavailable));
+        drop(admission);
+        service.close(&initial.id).await.unwrap();
+        assert_eq!(service.get(&initial.id).unwrap_err().kind, ErrorKind::NotFound);
+        assert_ne!(service.open(&dir.path().join("session.ipynb")).unwrap().id, initial.id);
+        service.shutdown().await;
     }
 
     #[test]

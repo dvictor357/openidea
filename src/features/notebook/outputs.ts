@@ -4,6 +4,11 @@ export type JsonObject = Record<string, unknown>;
 export function object(value: unknown): JsonObject {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as JsonObject) : {};
 }
+/** Notebook keys such as `__proto__` or `constructor` name data, never inherited members. */
+export function own(value: unknown, key: string): unknown {
+  const record = object(value);
+  return Object.hasOwn(record, key) ? record[key] : undefined;
+}
 export function mimeText(value: unknown): string {
   return typeof value === "string"
     ? value

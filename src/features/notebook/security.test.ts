@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { markdownFragment, sanitizedSvgUrl, staticOutputDocument } from "./security";
+import { markdownRoot, resolveMarkdownAttachments, sanitizedSvgUrl, staticOutputDocument } from "./security";
 
 const parse = (html: string) => new DOMParser().parseFromString(html, "text/html");
 
@@ -50,8 +50,10 @@ describe("static notebook output sanitization", () => {
   });
 
   it("resolves only embedded image attachments and makes Markdown file links editor-controlled", () => {
-    const root = markdownFragment(
-      `![chart](attachment:chart.png)\n\n![remote](https://attacker.invalid/a.png)\n\n[local](./other.py#L8)\n\n<script>alert(1)</script><div style="position:fixed">text</div>`,
+    const root = resolveMarkdownAttachments(
+      markdownRoot(
+        `![chart](attachment:chart.png)\n\n![remote](https://attacker.invalid/a.png)\n\n[local](./other.py#L8)\n\n<script>alert(1)</script><div style="position:fixed">text</div>`,
+      ),
       {
         "chart.png": { "image/png": "aGVsbG8=" },
       },

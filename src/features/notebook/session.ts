@@ -469,15 +469,20 @@ export class NotebookSession {
   async close() {
     this.publish({ frozen: true });
     ++this.generation;
-    await this.drain();
-    if (this.pumping) await this.pumping.catch(() => {});
-    if (this.loading) await this.loading.catch(() => {});
-    const snapshot = this.state.snapshot;
-    if (snapshot) await this.backend.close(snapshot.id);
-    this.disposed = true;
-    this.stopEvents?.();
-    this.editors.clear();
-    this.listeners.clear();
+    try {
+      // The host close interrupts, drains and shuts down authoritatively, and a
+      // retired project already rejects interrupt. Never let that skip release.
+      await this.drain().catch(() => {});
+      if (this.pumping) await this.pumping.catch(() => {});
+      if (this.loading) await this.loading.catch(() => {});
+      const snapshot = this.state.snapshot;
+      if (snapshot) await this.backend.close(snapshot.id);
+    } finally {
+      this.disposed = true;
+      this.stopEvents?.();
+      this.editors.clear();
+      this.listeners.clear();
+    }
   }
 }
 
@@ -496,6 +501,9 @@ export function existingNotebookSession(path: string) {
 export async function closeNotebook(path: string) {
   const session = sessions.get(path);
   if (!session) return;
-  await session.close();
-  if (sessions.get(path) === session) sessions.delete(path);
+  try {
+    await session.close();
+  } finally {
+    if (sessions.get(path) === session) sessions.delete(path);
+  }
 }

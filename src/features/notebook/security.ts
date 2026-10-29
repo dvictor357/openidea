@@ -1,6 +1,6 @@
 import DOMPurify from "dompurify";
 import { Marked } from "marked";
-import { mimeText, object } from "./outputs";
+import { mimeText, object, own } from "./outputs";
 
 export const OUTPUT_CSP =
   "default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; script-src 'none'; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-src 'none'; object-src 'none'; font-src 'none'; media-src 'none'; navigate-to 'none'";
@@ -222,8 +222,11 @@ export function staticOutputDocument(html: string): string {
 }
 
 const markdown = new Marked({ gfm: true });
-/** Host Markdown has no arbitrary CSS or remote images; link clicks are handled by the editor. */
-export function markdownFragment(source: string, attachments: unknown): HTMLElement {
+/**
+ * Sanitized Markdown with inert links; link clicks are handled by the editor and
+ * `attachment:` images are left for `resolveMarkdownAttachments`.
+ */
+export function markdownRoot(source: string): HTMLElement {
   const root = htmlRoot(markdown.parse(source, { async: false }) as string, true);
   for (const link of root.querySelectorAll("a[href]")) {
     const href = link.getAttribute("href")!;
@@ -232,17 +235,39 @@ export function markdownFragment(source: string, attachments: unknown): HTMLElem
     link.setAttribute("role", "link");
     link.setAttribute("tabindex", "0");
   }
+  return root;
+}
+
+function attachmentName(img: Element): string | null | undefined {
+  const src = img.getAttribute("src");
+  if (!src?.startsWith("attachment:")) return undefined;
+  try {
+    return decodeURIComponent(src.slice("attachment:".length));
+  } catch {
+    return null;
+  }
+}
+
+/** Names referenced after Markdown entity and URI decoding, which a source-text search would miss. */
+export function markdownAttachmentNames(root: HTMLElement): string[] {
+  const names = new Set<string>();
   for (const img of root.querySelectorAll("img")) {
-    const src = img.getAttribute("src");
-    if (!src?.startsWith("attachment:")) continue;
-    let name: string;
-    try {
-      name = decodeURIComponent(src.slice("attachment:".length));
-    } catch {
+    const name = attachmentName(img);
+    if (name) names.add(name);
+  }
+  return [...names];
+}
+
+/** Host Markdown has no arbitrary CSS or remote images: only embedded attachments resolve. */
+export function resolveMarkdownAttachments(root: HTMLElement, attachments: unknown): HTMLElement {
+  for (const img of root.querySelectorAll("img")) {
+    const name = attachmentName(img);
+    if (name === undefined) continue;
+    if (name === null) {
       img.removeAttribute("src");
       continue;
     }
-    const data = object(object(attachments)[name]);
+    const data = object(own(attachments, name));
     const url = imageMimeUrl(data);
     if (url) img.setAttribute("src", url);
     else img.replaceWith(document.createTextNode(img.getAttribute("alt") || name));

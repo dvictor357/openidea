@@ -104,6 +104,45 @@ function model() {
 }
 
 describe("shared notebook mutation session", () => {
+  it("retires event listeners even when the backend project disappears during close", async () => {
+    const m = model();
+    const session = new NotebookSession("/p/a.ipynb", m.backend, true);
+    await session.load();
+    const kernel = session.getState().kernel;
+    const failure = new IpcError({ kind: "notFound", message: "The backend project was replaced" });
+    m.backend.close = async () => {
+      throw failure;
+    };
+    await expect(session.close()).rejects.toBe(failure);
+    kernelFailure("Late failure from the retired kernel");
+    expect(session.getState().error).toBeNull();
+    expect(session.getState().kernel).toBe(kernel);
+  });
+
+  it("still releases the backend document when interrupting a running batch fails during close", async () => {
+    const m = model();
+    const session = new NotebookSession("/p/a.ipynb", m.backend, true);
+    await session.load();
+    const running = deferred<NotebookSnapshot>();
+    const retired = new IpcError({ kind: "notFound", message: "notebook project has closed" });
+    const started = deferred<void>();
+    m.backend.execute = () => {
+      started.resolve();
+      return running.promise;
+    };
+    m.backend.interrupt = async () => {
+      running.reject(retired);
+      throw retired;
+    };
+    const closed = vi.fn(async () => null);
+    m.backend.close = closed;
+    const execution = session.execute().catch(() => {});
+    await started.promise;
+    await session.close();
+    await execution;
+    expect(closed).toHaveBeenCalledWith("document-a");
+  });
+
   it("retains rapid typing over an older acknowledgement and serializes the latest intent", async () => {
     const m = model();
     const started = deferred<void>();
