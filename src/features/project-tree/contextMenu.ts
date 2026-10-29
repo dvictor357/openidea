@@ -19,6 +19,8 @@ import {
   deleteSelection,
   findFileUsages,
   folderOf,
+  openCopyDialog,
+  openFile,
   openMoveDialog,
   openRenameDialog,
   paste,
@@ -195,8 +197,15 @@ export function contextMenuItems(nodes: ProjectNode[]): MenuItem[] {
     { kind: "separator" },
   );
 
-  // Find Usages / Find in Files… / Replace in Files…
+  // Jump to Source / Find Usages / Find in Files… / Replace in Files…
   push(
+    files.length > 0 && {
+      id: "jumpToSource",
+      label: "Jump to Source",
+      icon: "edit",
+      shortcut: keyLabel("project.open"),
+      run: () => files.forEach((f) => void openFile(f.path)),
+    },
     inProject &&
       singleFile && {
         id: "findUsages",
@@ -224,6 +233,12 @@ export function contextMenuItems(nodes: ProjectNode[]): MenuItem[] {
         label: nonRoot.length === 1 ? (nonRoot[0]!.dir ? "Move Directory…" : "Move File…") : "Move…",
         shortcut: keyLabel("project.move"),
         run: () => openMoveDialog(nonRoot),
+      },
+      nonRoot.length > 0 && {
+        id: "copy",
+        label: nonRoot.length === 1 ? (nonRoot[0]!.dir ? "Copy Directory…" : "Copy File…") : "Copy…",
+        shortcut: keyLabel("project.copyElement"),
+        run: () => openCopyDialog(nonRoot),
       },
       nonRoot.length > 0 && { kind: "separator" },
       nonRoot.length > 0 && {

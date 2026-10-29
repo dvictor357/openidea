@@ -8,6 +8,7 @@ import { disconnectRemote } from "@/platform/remote";
 import { maybeEditorService, registerOverlay } from "@/workbench/contributions";
 import { confirmLeaveProject } from "@/platform/project";
 import { ConnectHost } from "./ConnectDialog";
+import { reloadEnvironment } from "./environment";
 import { closeConnectDialog, openConnectDialog } from "./model";
 
 export function activate(): () => void {
@@ -38,6 +39,16 @@ export function activate(): () => void {
             throw e;
           }
         },
+      },
+      {
+        id: "remote.reloadEnvironment",
+        title: "Reload Environment",
+        description:
+          "Reads the login shell's environment (and devcontainer.json remoteEnv on a remote host) again for new terminals and processes.",
+        category: "File",
+        keywords: ["env", "environment", "variables", "path", "shell", "remoteEnv", "devcontainer", "reload"],
+        when: "projectOpen",
+        run: () => reloadEnvironment(),
       },
     ]),
   ];

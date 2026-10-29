@@ -1,9 +1,9 @@
 /** Diff viewer editor tab (side-by-side / unified) built on @codemirror/merge. */
 import { focusedDiffNavigator, setFocusedDiffNavigator, type DiffNavigator } from "./diffNavigator";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import clsx from "clsx";
 import { EditorView, keymap } from "@codemirror/view";
-import { Text, type Extension } from "@codemirror/state";
+import { Prec, Text, type Extension } from "@codemirror/state";
 import { history, historyKeymap } from "@codemirror/commands";
 import {
   MergeView,
@@ -15,14 +15,16 @@ import {
   Chunk,
 } from "@codemirror/merge";
 import { attachDocument, embeddedEditorExtensions, type DocumentAttachment } from "@/editor/api";
+import { setFindOpen } from "@/editor/core/cm/find";
+import { FindPanel, searchAgain, seedFind, type FindTarget } from "@/editor/core/view/FindBar";
 import { setContext } from "@/platform/context";
 import { call, commands } from "@/platform/ipc";
-import { shortcutLabel } from "@/platform/keymap";
+import { bindingsFor, normalizeBinding, shortcutLabel, strokeOf } from "@/platform/keymap";
 import { tx } from "@/platform/i18n";
-import { IconButton, Select, Spinner, T } from "@/ui";
+import { IconButton, Select, Spinner, T, showContextMenu } from "@/ui";
 import { editorService, type EditorInput } from "@/workbench/contributions";
 import { languageFor, viewerBase } from "./cm";
-import { applyChunk, arrowControls, hoverRevert } from "./diffControls";
+import { applyChunk, arrowControls, chunkAt, hoverRevert } from "./diffControls";
 import {
   HIGHLIGHT_OPTIONS,
   IGNORE_OPTIONS,
@@ -47,6 +49,7 @@ import {
   type DiffSide,
 } from "./diffInput";
 import { diffAnnotations } from "./diffAnnotations";
+import { UnalignedPanes } from "./diffScroll";
 import { groupOf } from "./changes";
 import { inclusionGutter } from "./hunkInclusion";
 import { hunksOverlapping } from "./hunks";
@@ -63,6 +66,8 @@ interface Views {
   b: EditorView;
   a: EditorView | null;
   merge: MergeView | null;
+  /** Unpadded side-by-side panes with synchronized scrolling (IDEA). */
+  panes: UnalignedPanes | null;
   destroy(): void;
 }
 
@@ -112,6 +117,15 @@ async function attachSide(side: DiffSide, path: string): Promise<DocumentAttachm
 
 const editableExtensions = (): Extension => [history(), keymap.of(historyKeymap)];
 
+type Side = "a" | "b";
+type ViewUpdateFn = (u: { docChanged: boolean; selectionSet: boolean }) => void;
+
+/** Whether `e` is one of the strokes bound to `actionId`. */
+function isStrokeOf(e: KeyboardEvent, actionId: string): boolean {
+  const stroke = strokeOf(e.nativeEvent);
+  return !!stroke && bindingsFor(actionId).some((b) => normalizeBinding(b) === stroke);
+}
+
 export function DiffEditor({ input }: { input: EditorInput }) {
   const data = input.data as DiffData;
   const { path, left, right } = data;
@@ -126,7 +140,9 @@ export function DiffEditor({ input }: { input: EditorInput }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const viewsRef = useRef<Views | null>(null);
   const staticsRef = useRef(statics);
-  const focusedSide = useRef<"a" | "b">("b");
+  const focusedSide = useRef<Side>("b");
+  /** Bumped when the views are rebuilt, so the find bar re-applies its query. */
+  const [viewsGen, setViewsGen] = useState(0);
   const version = useVcs((s) => s.version);
   const leftKey = sideKey(left);
   const rightKey = sideKey(right);
@@ -214,22 +230,28 @@ export function DiffEditor({ input }: { input: EditorInput }) {
   const editableB = !!attached?.b && !attached.b.readOnly;
   const ready = !!attached && !!statics && lang !== null;
 
+  // Read when the views are built; toggling it later goes through `setSync`.
+  const syncScroll = useRef(opts.syncScroll);
+  syncScroll.current = opts.syncScroll;
+
   // (Re)build the CodeMirror views.
   useEffect(() => {
     const host = hostRef.current;
     if (!host || !attached || !statics || lang === null) return;
     const textA = attached.a?.text() ?? statics.a ?? "";
     const textB = attached.b?.text() ?? statics.b ?? "";
-    const scrollTop = viewsRef.current
-      ? viewsRef.current.merge
-        ? (viewsRef.current.merge.dom as HTMLElement).scrollTop
-        : viewsRef.current.b.scrollDOM.scrollTop
+    const prev = viewsRef.current;
+    const scrollTop = prev
+      ? prev.merge && !prev.panes
+        ? (prev.merge.dom as HTMLElement).scrollTop
+        : prev.b.scrollDOM.scrollTop
       : null;
-    viewsRef.current?.destroy();
+    prev?.destroy();
     host.textContent = "";
     const listener = EditorView.updateListener.of((u) => {
       if (u.selectionSet || u.docChanged) updateChunkInfo();
     });
+    const findWatch = (s: Side) => EditorView.updateListener.of((u) => findWatchers.current[s].forEach((fn) => fn(u)));
     const focusTracker = (side: "a" | "b") =>
       EditorView.domEventHandlers({
         focus: () => {
@@ -242,7 +264,9 @@ export function DiffEditor({ input }: { input: EditorInput }) {
     const highlightChanges = opts.highlight === "words";
     const inclusion = includable ? inclusionGutter(path, textA) : [];
     const side = (att: DocumentAttachment | null, editable: boolean, notes?: "left" | "right"): Extension[] => [
-      viewerBase({ readOnly: !editable }),
+      viewerBase({ readOnly: !editable, findBar: true }),
+      // Esc closes the find bar before it collapses the selection (a found match); open popups go first.
+      Prec.high(keymap.of([{ key: "Escape", run: () => findEscape.current() }])),
       lang,
       att?.extension ?? [],
       editable ? [editableExtensions(), embeddedEditorExtensions(path)] : [],
@@ -256,12 +280,23 @@ export function DiffEditor({ input }: { input: EditorInput }) {
     let views: Views;
     if (opts.mode === "split") {
       let merge: MergeView | null = null;
+      const panes = opts.alignChanges
+        ? null
+        : new UnalignedPanes({
+            sync: syncScroll.current,
+            arrows:
+              editableA || editableB
+                ? { toA: editableA, toB: editableB, apply: (i, source) => merge && applyChunk(merge, i, source) }
+                : undefined,
+          });
       const mv = new MergeView({
         a: {
           doc: textA,
           extensions: [
             side(attached.a, editableA, "left"),
+            panes?.extension ?? [],
             focusTracker("a"),
+            findWatch("a"),
             editableA ? hoverRevert((_v, i) => merge && applyChunk(merge, i, "b")) : [],
           ],
         },
@@ -269,24 +304,45 @@ export function DiffEditor({ input }: { input: EditorInput }) {
           doc: textB,
           extensions: [
             side(attached.b, editableB, "right"),
+            panes?.extension ?? [],
             listener,
             focusTracker("b"),
+            findWatch("b"),
             inclusion,
             editableB ? hoverRevert((_v, i) => merge && applyChunk(merge, i, "a")) : [],
           ],
         },
         parent: host,
-        revertControls: editableB ? "a-to-b" : editableA ? "b-to-a" : undefined,
+        // Unaligned panes draw their arrows on their own divider.
+        revertControls: panes ? undefined : editableB ? "a-to-b" : editableA ? "b-to-a" : undefined,
         renderRevertControl:
-          editableA || editableB ? arrowControls(() => merge, { toA: editableA, toB: editableB }) : undefined,
+          !panes && (editableA || editableB)
+            ? arrowControls(() => merge, { toA: editableA, toB: editableB })
+            : undefined,
         highlightChanges,
-        gutter: true,
+        // Unpadded panes tint the gutters of changed lines instead of a change bar.
+        gutter: !panes,
         collapseUnchanged,
         diffConfig,
       });
       merge = mv;
-      views = { a: mv.a, b: mv.b, merge: mv, destroy: () => mv.destroy() };
-      if (scrollTop != null) requestAnimationFrame(() => ((mv.dom as HTMLElement).scrollTop = scrollTop));
+      panes?.attach(mv);
+      views = {
+        a: mv.a,
+        b: mv.b,
+        merge: mv,
+        panes,
+        destroy: () => {
+          panes?.destroy();
+          mv.destroy();
+        },
+      };
+      if (scrollTop != null)
+        requestAnimationFrame(() => {
+          // The left pane of unpadded panes follows by itself.
+          if (!panes) (mv.dom as HTMLElement).scrollTop = scrollTop;
+          else mv.b.scrollDOM.scrollTop = scrollTop;
+        });
     } else {
       const view = new EditorView({
         doc: textB,
@@ -295,6 +351,7 @@ export function DiffEditor({ input }: { input: EditorInput }) {
           side(attached.b, editableB, "right"),
           listener,
           focusTracker("b"),
+          findWatch("b"),
           inclusion,
           unifiedMergeView({
             original: textA,
@@ -319,16 +376,18 @@ export function DiffEditor({ input }: { input: EditorInput }) {
           }),
         ],
       });
-      views = { a: null, b: view, merge: null, destroy: () => view.destroy() };
+      views = { a: null, b: view, merge: null, panes: null, destroy: () => view.destroy() };
       if (scrollTop != null) requestAnimationFrame(() => (view.scrollDOM.scrollTop = scrollTop));
     }
     viewsRef.current = views;
+    setViewsGen((g) => g + 1);
     requestAnimationFrame(updateChunkInfo);
   }, [
     attached,
     statics,
     lang,
     opts.mode,
+    opts.alignChanges,
     opts.collapse,
     opts.ignore,
     opts.highlight,
@@ -339,6 +398,8 @@ export function DiffEditor({ input }: { input: EditorInput }) {
     includable,
     path,
   ]);
+
+  useEffect(() => viewsRef.current?.panes?.setSync(opts.syncScroll), [opts.syncScroll]);
 
   useEffect(
     () => () => {
@@ -507,10 +568,154 @@ export function DiffEditor({ input }: { input: EditorInput }) {
     }
   };
 
-  const nav = useRef<DiffNavigator>({ next: () => step(1), prev: () => step(-1), jumpToSource });
+  // Find (⌘F / ⌘R / ⌘G): the editor's find bar over the focused side.
+  const [find, setFind] = useState<{ side: Side; replace: boolean; seq: number } | null>(null);
+  const findWatchers = useRef<Record<Side, Set<ViewUpdateFn>>>({ a: new Set(), b: new Set() });
+  const findEscape = useRef<() => boolean>(() => false);
+  /** The side the bar searches (the last one, once closed: closing clears its highlights). */
+  const findSide = useRef<Side>("b");
+  const findOpen = useRef(false);
+  const findId = useId();
+  const viewOf = (s: Side) => (s === "a" && viewsRef.current?.a) || viewsRef.current?.b || null;
+  const findTarget = useMemo<FindTarget>(() => {
+    const sideOf = (): Side => (findSide.current === "a" && viewsRef.current?.a ? "a" : "b");
+    return {
+      id: `diff:${findId}`,
+      view: () => (sideOf() === "a" ? viewsRef.current?.a : viewsRef.current?.b) ?? null,
+      watch(fn) {
+        const set = findWatchers.current[sideOf()];
+        set.add(fn);
+        return () => void set.delete(fn);
+      },
+      isOpen: () => findOpen.current,
+    };
+  }, [findId]);
+  const editableSide = (s: Side) => (s === "a" ? editableA : editableB);
+
+  const openFind = (replace: boolean) => {
+    const views = viewsRef.current;
+    if (!views) return;
+    const s: Side = focusedSide.current === "a" && views.a ? "a" : "b";
+    if (findOpen.current && findSide.current !== s)
+      viewOf(findSide.current)?.dispatch({ effects: setFindOpen.of(false) });
+    findSide.current = s;
+    findOpen.current = true;
+    const withReplace = replace && editableSide(s);
+    seedFind(findTarget, withReplace);
+    setFind((f) => ({ side: s, replace: withReplace, seq: (f?.seq ?? 0) + 1 }));
+  };
+  const closeFind = () => {
+    findOpen.current = false;
+    setFind(null);
+    viewOf(findSide.current)?.focus();
+  };
+  findEscape.current = () => {
+    if (!findOpen.current) return false;
+    closeFind();
+    return true;
+  };
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (e.defaultPrevented) return;
+    if (isStrokeOf(e, "find.inFile")) openFind(false);
+    else if (isStrokeOf(e, "find.replaceInFile")) openFind(true);
+    else if (isStrokeOf(e, "find.next") || isStrokeOf(e, "find.previous")) {
+      if (!findOpen.current) findSide.current = focusedSide.current;
+      if (!searchAgain(findTarget, isStrokeOf(e, "find.next"))) openFind(false);
+    } else if (e.key === "Escape" && findOpen.current) closeFind();
+    else return;
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  /** ⌃⌘→ / ⌃⌘←: the change at the caret applied toward the other, editable side. */
+  const applyChange = (source: "a" | "b") => {
+    const views = viewsRef.current;
+    const merge = views?.merge;
+    if (!merge || !views.a || !(source === "a" ? editableB : editableA)) return false;
+    const side = focusedSide.current;
+    const view = side === "a" ? views.a : views.b;
+    const index = chunkAt(merge.chunks, side, view.state.selection.main.head, view.state.doc.length);
+    if (index < 0) return false;
+    applyChunk(merge, index, source);
+    return true;
+  };
+  const file = (dir: 1 | -1) => {
+    const neighbour = chainNeighbour(data, dir);
+    if (neighbour) void openDiff(neighbour, { preview: true });
+  };
+  const toolbarRef = useRef<HTMLDivElement | null>(null);
+  /** The viewer settings menu, under the toolbar's gear (`from`) or its start. */
+  const showSettings = (from?: HTMLElement) => {
+    const r = (from ?? toolbarRef.current)?.getBoundingClientRect();
+    showContextMenu({ x: r ? r.left + (from ? 0 : 8) : 120, y: r ? r.bottom : 120 }, [
+      { kind: "header", label: "Viewer" },
+      {
+        id: "split",
+        label: "Side-by-side Viewer",
+        checked: opts.mode === "split",
+        run: () => setOpts({ mode: "split" }),
+      },
+      {
+        id: "unified",
+        label: "Unified Viewer",
+        checked: opts.mode === "unified",
+        run: () => setOpts({ mode: "unified" }),
+      },
+      { kind: "separator" },
+      {
+        id: "ignore",
+        label: "Ignore Whitespace",
+        submenu: IGNORE_OPTIONS.map((o) => ({
+          id: o.value,
+          label: o.label,
+          checked: opts.ignore === o.value,
+          run: () => setOpts({ ignore: o.value }),
+        })),
+      },
+      {
+        id: "highlight",
+        label: "Highlighting",
+        submenu: HIGHLIGHT_OPTIONS.map((o) => ({
+          id: o.value,
+          label: o.label,
+          checked: opts.highlight === o.value,
+          run: () => setOpts({ highlight: o.value }),
+        })),
+      },
+      { kind: "separator" },
+      {
+        id: "collapse",
+        label: "Collapse Unchanged Fragments",
+        checked: opts.collapse,
+        run: () => setOpts({ collapse: !opts.collapse }),
+      },
+      {
+        id: "sync",
+        label: "Synchronize Scrolling",
+        checked: opts.syncScroll,
+        disabled: opts.mode !== "split",
+        run: () => setOpts({ syncScroll: !opts.syncScroll }),
+      },
+      {
+        id: "align",
+        label: "Align Changes",
+        checked: opts.alignChanges,
+        disabled: opts.mode !== "split",
+        run: () => setOpts({ alignChanges: !opts.alignChanges }),
+      },
+    ]);
+  };
+  const nav = useRef<DiffNavigator>({
+    next: () => step(1),
+    prev: () => step(-1),
+    jumpToSource,
+    applyChange,
+    file,
+    showSettings,
+  });
   useEffect(() => {
-    nav.current = { next: () => step(1), prev: () => step(-1), jumpToSource };
-  }, [step, jumpToSource]);
+    nav.current = { next: () => step(1), prev: () => step(-1), jumpToSource, applyChange, file, showSettings };
+  });
 
   useEffect(
     () => () => {
@@ -531,6 +736,7 @@ export function DiffEditor({ input }: { input: EditorInput }) {
   return (
     <div
       className={styles.root}
+      onKeyDown={onKeyDown}
       onFocusCapture={() => {
         setFocusedDiffNavigator(nav.current);
         setContext("diffEditorFocus", true);
@@ -542,7 +748,7 @@ export function DiffEditor({ input }: { input: EditorInput }) {
         }
       }}
     >
-      <div className={styles.toolbar} role="toolbar" aria-label={tx("Diff")}>
+      <div ref={toolbarRef} className={styles.toolbar} role="toolbar" aria-label={tx("Diff")}>
         <IconButton
           icon="arrow-up"
           title="Previous Difference"
@@ -648,6 +854,14 @@ export function DiffEditor({ input }: { input: EditorInput }) {
                   ? tx`${chunkInfo.count} difference`
                   : tx`${chunkInfo.count} differences`}
         </span>
+        <IconButton
+          icon="settings"
+          title="Settings"
+          shortcut={shortcutLabel("diff.showSettings")}
+          size="small"
+          aria-haspopup="menu"
+          onClick={(e) => showSettings(e.currentTarget)}
+        />
       </div>
       {opts.mode === "split" ? (
         <div className={styles.labels}>
@@ -673,6 +887,24 @@ export function DiffEditor({ input }: { input: EditorInput }) {
           </span>
         </div>
       )}
+      {find && ready && (
+        <div
+          className={clsx(
+            styles.findRow,
+            opts.mode === "split" && styles.findRowSplit,
+            opts.mode === "split" && find.side === "b" && styles.findRowRight,
+          )}
+        >
+          <FindPanel
+            target={findTarget}
+            version={`${viewsGen}:${find.side}`}
+            replace={find.replace}
+            seq={find.seq}
+            onReplaceShown={editableSide(find.side) ? (replace) => setFind((f) => f && { ...f, replace }) : undefined}
+            onClose={closeFind}
+          />
+        </div>
+      )}
       {error ? (
         <div className={styles.message}>{error}</div>
       ) : !ready ? (
@@ -685,7 +917,7 @@ export function DiffEditor({ input }: { input: EditorInput }) {
         className={clsx(
           styles.host,
           opts.highlight === "none" && styles.noHighlight,
-          opts.mode === "split" && !opts.syncScroll && styles.unsynced,
+          opts.mode === "split" && (opts.alignChanges ? !opts.syncScroll && styles.unsynced : styles.unaligned),
         )}
         hidden={!!error || !ready}
         aria-label={diffTitle(data)}

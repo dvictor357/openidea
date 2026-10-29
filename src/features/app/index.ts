@@ -4,7 +4,8 @@
  */
 import { registerOverlay, registerStatusItem } from "@/workbench/contributions";
 import { AboutOverlay } from "./AboutDialog";
-import { appActions, checkForUpdatesOnStartup, updateActions } from "./appActions";
+import { appActions, updateActions } from "./appActions";
+import { checkForUpdatesOnStartup } from "./updates";
 import { installCloseGuard } from "./closeGuard";
 import { InvalidateCachesOverlay, registerInvalidateCachesActions } from "./InvalidateCaches";
 import { buildInfo } from "./host";
@@ -15,7 +16,7 @@ import { installMenuBridge } from "./menuBridge";
 import { NewProjectOverlay } from "./NewProject";
 import { projectActions, registerPowerSaveBanner } from "./projectActions";
 import { installWindowTitle } from "./title";
-import { installLaunchHandling, windowActions } from "./windows";
+import { installLaunchHandling, installLightEditAutoClose, windowActions } from "./windows";
 
 /** The UI locale of a secondary (Settings) window. */
 export const activateLocale = installLocaleSync;
@@ -42,6 +43,7 @@ export function activate(): () => void {
     installWindowTitle(),
     installCloseGuard(),
     installLaunchHandling(),
+    installLightEditAutoClose(),
   ];
   let disposed = false;
   void buildInfo().then((b) => {

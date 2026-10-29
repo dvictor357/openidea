@@ -3,12 +3,21 @@
  * based theme + syntax colours and lazy language loading by file name.
  */
 import { HighlightStyle, LanguageDescription, syntaxHighlighting, type LanguageSupport } from "@codemirror/language";
-import { EditorState, RangeSetBuilder, type Extension, type Line } from "@codemirror/state";
+import {
+  Compartment,
+  EditorState,
+  RangeSet,
+  RangeSetBuilder,
+  StateField,
+  type Extension,
+  type Line,
+} from "@codemirror/state";
 import {
   Decoration,
   EditorView,
+  GutterMarker,
   ViewPlugin,
-  drawSelection,
+  gutterLineClass,
   highlightActiveLine,
   keymap,
   lineNumbers,
@@ -19,21 +28,25 @@ import { getChunks } from "@codemirror/merge";
 import { defaultKeymap } from "@codemirror/commands";
 import { search, searchKeymap } from "@codemirror/search";
 import { tags as t } from "@lezer/highlight";
+import { findExtension } from "@/editor/core/cm/find";
+import { caretExtension } from "@/editor/core/cm/prefs";
+import { caretStyles, findLocals, findStyles } from "@/editor/core/cm/theme";
+import { editorPrefs } from "@/platform/editorSettings";
+import { useProject } from "@/platform/project";
 
 const wholeLine = Decoration.line({ class: "cm-diffWholeLine" });
 
 /**
- * Marks the changed lines that have no counterpart on the other side (inserted
- * or deleted as a whole) so they get a solid background. Lines paired with a
- * line on the other side keep the line tint plus word-level highlights.
+ * Calls `f` for the changed lines of a side-by-side pane between `vpFrom` and
+ * `vpTo`, with whether the line has no counterpart on the other side (inserted
+ * or deleted as a whole). Lines paired with a line on the other side keep the
+ * line tint plus word-level highlights.
  */
-function wholeLineDeco(view: EditorView): DecorationSet {
-  const info = getChunks(view.state);
-  if (!info || !info.side) return Decoration.none;
+function forChangedLines(state: EditorState, vpFrom: number, vpTo: number, f: (line: Line, whole: boolean) => void) {
+  const info = getChunks(state);
+  if (!info || !info.side) return;
   const isA = info.side === "a";
-  const { doc } = view.state;
-  const { from: vpFrom, to: vpTo } = view.viewport;
-  const builder = new RangeSetBuilder<Decoration>();
+  const { doc } = state;
   for (const chunk of info.chunks) {
     const from = isA ? chunk.fromA : chunk.fromB;
     const to = isA ? chunk.toA : chunk.toB;
@@ -45,11 +58,46 @@ function wholeLineDeco(view: EditorView): DecorationSet {
     const covered = (line: Line) =>
       ranges.some(([f = 0, t = 0]) => (f <= line.from && t > line.to) || (f < line.from && t >= line.to));
     for (let line = doc.lineAt(Math.max(from, vpFrom)); line.from < Math.min(to, vpTo);) {
-      if (otherEmpty || covered(line)) builder.add(line.from, line.from, wholeLine);
+      f(line, otherEmpty || covered(line));
       if (line.number === doc.lines) break;
       line = doc.line(line.number + 1);
     }
   }
+}
+
+/** Solid background for the lines changed as a whole. */
+function wholeLineDeco(view: EditorView): DecorationSet {
+  const builder = new RangeSetBuilder<Decoration>();
+  forChangedLines(view.state, view.viewport.from, view.viewport.to, (line, whole) => {
+    if (whole) builder.add(line.from, line.from, wholeLine);
+  });
+  return builder.finish();
+}
+
+class LineClassMarker extends GutterMarker {
+  constructor(readonly elementClass: string) {
+    super();
+  }
+}
+
+const changedGutter = new LineClassMarker("cm-diffChangedGutter");
+const wholeGutter = new LineClassMarker("cm-diffChangedGutter cm-diffWholeGutter");
+
+/** The line background of changed lines carried into the gutters (line numbers, inclusion boxes), as in IDEA. */
+export const changedLineGutters = StateField.define<RangeSet<GutterMarker>>({
+  create: (state) => changedGutterMarkers(state),
+  update: (value, tr) =>
+    tr.docChanged || getChunks(tr.startState)?.chunks !== getChunks(tr.state)?.chunks
+      ? changedGutterMarkers(tr.state)
+      : value,
+  provide: (f) => gutterLineClass.from(f),
+});
+
+function changedGutterMarkers(state: EditorState): RangeSet<GutterMarker> {
+  const builder = new RangeSetBuilder<GutterMarker>();
+  forChangedLines(state, 0, state.doc.length + 1, (line, whole) =>
+    builder.add(line.from, line.from, whole ? wholeGutter : changedGutter),
+  );
   return builder.finish();
 }
 
@@ -98,10 +146,11 @@ export const viewerTheme = EditorView.theme(
       backgroundColor: "var(--bg-app)",
       color: "var(--fg)",
       fontSize: "var(--fs-code)",
+      ...findLocals,
     },
     ".cm-scroller": { fontFamily: "var(--font-mono)", fontWeight: "var(--fw-code, 400)", lineHeight: "var(--lh-code)" },
-    ".cm-content": { caretColor: "var(--accent)", WebkitUserSelect: "text", userSelect: "text" },
-    ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--accent)" },
+    ".cm-content": { caretColor: "var(--caret, var(--fg-strong))", WebkitUserSelect: "text", userSelect: "text" },
+    ...caretStyles,
     "&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, .cm-selectionBackground, ::selection": {
       backgroundColor: "var(--bg-selected-strong)",
     },
@@ -138,6 +187,19 @@ export const viewerTheme = EditorView.theme(
     "&.cm-merge-b .cm-changedText, .cm-insertedLine .cm-changedText": {
       background: "color-mix(in srgb, var(--success) 26%, transparent)",
     },
+    // Gutters of changed lines take the line background (changedLineGutters).
+    "&.cm-merge-a .cm-diffChangedGutter": {
+      backgroundColor: "color-mix(in srgb, var(--gutter-deleted) 12%, transparent)",
+    },
+    "&.cm-merge-b .cm-diffChangedGutter": {
+      backgroundColor: "color-mix(in srgb, var(--gutter-added) 12%, transparent)",
+    },
+    "&.cm-merge-a .cm-diffWholeGutter": {
+      backgroundColor: "color-mix(in srgb, var(--danger) 26%, transparent)",
+    },
+    "&.cm-merge-b .cm-diffWholeGutter": {
+      backgroundColor: "color-mix(in srgb, var(--success) 26%, transparent)",
+    },
     ".cm-changeGutter": { width: "3px", paddingLeft: "0" },
     "&.cm-merge-a .cm-changedLineGutter, .cm-deletedLineGutter": { background: "var(--gutter-deleted)" },
     "&.cm-merge-b .cm-changedLineGutter": { background: "var(--gutter-modified)" },
@@ -163,18 +225,42 @@ export const viewerTheme = EditorView.theme(
     },
     ".cm-panels": { backgroundColor: "var(--bg-elev)", color: "var(--fg)" },
     ".cm-searchMatch": { backgroundColor: "color-mix(in srgb, var(--accent) 22%, transparent)" },
+    ...findStyles,
   },
   { dark: true },
 );
 
-/** Base extensions for a read-only (or editable) viewer pane. */
-export function viewerBase(opts: { readOnly: boolean; lineNumbers?: boolean }): Extension[] {
+const caretSlot = new Compartment();
+
+/** The editor's caret (Settings › Editor › General › Appearance), kept in step with the settings. */
+function viewerCaret(): Extension {
+  return [
+    caretSlot.of(caretExtension(editorPrefs())),
+    ViewPlugin.define((view) => {
+      let appearance = editorPrefs().appearance;
+      const unsubscribe = useProject.subscribe(() => {
+        const next = editorPrefs();
+        if (JSON.stringify(next.appearance) === JSON.stringify(appearance)) return;
+        appearance = next.appearance;
+        view.dispatch({ effects: caretSlot.reconfigure(caretExtension(next)) });
+      });
+      return { destroy: unsubscribe };
+    }),
+  ];
+}
+
+/**
+ * Base extensions for a read-only (or editable) viewer pane. `findBar`: the
+ * viewer shows the editor's find bar (FindPanel) instead of CodeMirror's panel.
+ */
+export function viewerBase(opts: { readOnly: boolean; lineNumbers?: boolean; findBar?: boolean }): Extension[] {
   return [
     opts.lineNumbers === false ? [] : lineNumbers(),
-    drawSelection(),
+    viewerCaret(),
     highlightActiveLine(),
-    search({ top: true }),
-    keymap.of([...searchKeymap, ...defaultKeymap]),
+    opts.findBar
+      ? [findExtension(), keymap.of(defaultKeymap)]
+      : [search({ top: true }), keymap.of([...searchKeymap, ...defaultKeymap])],
     syntaxHighlighting(viewerHighlight),
     viewerTheme,
     wholeChangedLines,

@@ -35,6 +35,7 @@ import { fileIconName, showContextMenu, type MenuItem } from "@/ui";
 import { usePlatform } from "@/platform/platformInfo";
 import {
   activateTab,
+  changeSplitOrientation,
   closeAll,
   closeKey,
   closeOthers,
@@ -62,6 +63,7 @@ import {
   splitPane,
   tabOptions,
   togglePin,
+  unsplitAll,
   type SplitEdge,
   type Tab,
   type TabsState,
@@ -116,6 +118,9 @@ export function isTextInput(input: EditorInput): input is EditorInput & { path: 
 }
 
 export const useTabs = create<TabsState>(() => initialTabsState());
+
+/** Session key of the LightEdit window: its tabs reopen the next time a window switches to LightEdit. */
+export const LIGHT_EDIT_SESSION = "<lightEdit>";
 
 export interface EditorStatus {
   path: string;
@@ -194,7 +199,7 @@ export class EditorController implements SlotHost {
   activeSlot: EditorSlot | null = null;
   private statusScheduled = false;
   private disposers: Array<() => void> = [];
-  /** Project root whose editor session is being tracked (null while switching). */
+  /** Project root (or {@link LIGHT_EDIT_SESSION}) whose editor session is being tracked (null while switching). */
   private sessionRoot: string | null = null;
   private sessionTimer: ReturnType<typeof setTimeout> | undefined;
   /** Restored caret / scroll per path, applied when the file's first slot is created. */
@@ -273,7 +278,9 @@ export class EditorController implements SlotHost {
           this.projectTransition = this.releaseDocuments(documents.values())
             .catch((e) => this.documentError(e))
             .then(() => {
-              if (generation === this.projectGeneration && root) this.restoreSession(root);
+              if (generation !== this.projectGeneration) return;
+              if (root) this.restoreSession(root);
+              else if (s.lightEdit) this.restoreSession(LIGHT_EDIT_SESSION);
             });
         } else if (previous.opening && !s.opening && this.closeCommitted) {
           // A failed project open returns to the same project.
@@ -988,6 +995,15 @@ export class EditorController implements SlotHost {
     }
   }
 
+  /** Window › Editor Tabs › Goto Next / Previous Splitter: the active tab of the next split pane, wrapping. */
+  focusSplitter(dir: 1 | -1) {
+    const s = useTabs.getState();
+    const ids = paneIds(s).filter((id) => s.panes[id]?.active);
+    if (ids.length < 2) return;
+    const next = ids[(ids.indexOf(s.activePane) + dir + ids.length) % ids.length]!;
+    this.activate(next, s.panes[next]!.active!);
+  }
+
   // --- tab commands -----------------------------------------------------------------------------
 
   private apply(f: (s: TabsState) => TabsState) {
@@ -1154,6 +1170,12 @@ export class EditorController implements SlotHost {
       protect: (tab) => tab.pinned || modified(tab),
     });
   }
+  closeReadOnly(paneId: string): Promise<boolean> {
+    const writable = (t: Tab) => !t.input.path || !useDocMeta.getState()[t.input.path]?.readOnly;
+    return this.removeGuarded((s) => (s.panes[paneId] ? closeUnmodified(s, paneId, writable) : s), {
+      protect: (tab) => tab.pinned || writable(tab),
+    });
+  }
   /** Reload from Disk: re-reads the open, unmodified documents of `paths`. */
   async reloadFromDisk(paths: string[]) {
     for (const path of paths) {
@@ -1253,6 +1275,34 @@ export class EditorController implements SlotHost {
 
   unsplit(paneId: string): Promise<boolean> {
     return this.removeGuarded((s) => (s.panes[paneId] ? removePane(s, paneId) : s));
+  }
+  async unsplitAll(paneId: string): Promise<boolean> {
+    const closed = await this.removeGuarded((s) => unsplitAll(s, paneId));
+    if (closed) {
+      this.apply((s) => setActivePane(s, paneId));
+      this.focus();
+    }
+    return closed;
+  }
+  changeSplitOrientation(paneId: string) {
+    this.apply((s) => changeSplitOrientation(s, paneId));
+  }
+  /** IDEA "Open in Opposite Group": the tab stays and a copy opens next door (or in a new split). */
+  openInOpposite(paneId: string, tabId: string) {
+    const s = useTabs.getState();
+    const tab = s.panes[paneId]?.tabs.find((t) => t.id === tabId);
+    if (!tab) return;
+    const target = neighbourPane(s, paneId);
+    if (!target) {
+      this.activate(paneId, tabId, false);
+      return this.split(paneId, "row");
+    }
+    const r = openTab(s, target, tab.input);
+    useTabs.setState(r.state, true);
+    void this.ensureSlot(r.tabId, { from: this.slots.get(tabId) }).then((slot) => {
+      if (slot?.view) slot.focus();
+      else if (slot) slot.wantsFocus = true;
+    });
   }
 
   closeActiveTab(): Promise<boolean> {
@@ -1507,8 +1557,12 @@ export class EditorController implements SlotHost {
       ...(tabs.some((t) => t.pinned)
         ? ([{ label: "Close All but Pinned", run: () => void this.closeAll(paneId, true) }] as MenuItem[])
         : []),
+      ...(tabs.some((t) => !t.pinned && !!t.input.path && useDocMeta.getState()[t.input.path]?.readOnly)
+        ? ([{ label: "Close All Read-Only Tabs", run: () => void this.closeReadOnly(paneId) }] as MenuItem[])
+        : []),
       { kind: "separator" },
       { label: tab.pinned ? "Unpin Tab" : "Pin Tab", icon: "pin", run: () => this.togglePin(paneId, tab.id) },
+      ...(tab.preview ? ([{ label: "Keep Tab Open", run: () => this.keepTab(paneId, tab.id) }] as MenuItem[]) : []),
       { kind: "separator" },
       { label: "Split and Move Right", run: () => this.moveTabToSplit(paneId, tab.id, paneId, "right") },
       { label: "Split and Move Down", run: () => this.moveTabToSplit(paneId, tab.id, paneId, "bottom") },
@@ -1527,7 +1581,10 @@ export class EditorController implements SlotHost {
       ...(split
         ? ([
             { label: "Move to Opposite Group", run: () => this.moveToOpposite(paneId, tab.id) },
+            { label: "Open in Opposite Group", run: () => this.openInOpposite(paneId, tab.id) },
+            { label: "Change Splitter Orientation", run: () => this.changeSplitOrientation(paneId) },
             { label: "Unsplit", run: () => void this.unsplit(paneId) },
+            { label: "Unsplit All", run: () => void this.unsplitAll(paneId) },
           ] as MenuItem[])
         : []),
       { kind: "separator" },

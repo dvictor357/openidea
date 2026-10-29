@@ -1,8 +1,8 @@
 /** Editor actions (ids from keymaps/intellij-macos.ts). */
 import { EditorSelection, type EditorState } from "@codemirror/state";
-import type { EditorView } from "@codemirror/view";
-import { addCursorAbove, addCursorBelow, moveLineDown, moveLineUp, toggleBlockComment } from "@codemirror/commands";
-import { syntaxTree, toggleFold } from "@codemirror/language";
+import { EditorView } from "@codemirror/view";
+import { indentSelection, moveLineDown, moveLineUp, toggleBlockComment } from "@codemirror/commands";
+import { foldEffect, syntaxTree, toggleFold } from "@codemirror/language";
 import { acceptCompletion, completionStatus } from "@codemirror/autocomplete";
 import { executeAction, registerActions, type Action } from "@/platform/actions";
 import { getContext } from "@/platform/context";
@@ -37,20 +37,29 @@ import {
   collapseRecursively,
   expandAll,
   expandRecursively,
+  collapseBlock,
+  expandToLevelEffects,
   foldAtCaret,
   foldSelection,
   unfoldAtCaret,
 } from "./cm/folding";
 import { reverseLines, sortLines } from "./cm/lines";
+import { customRegions } from "./cm/regions";
+import { enclosingHeaders } from "./cm/stickyScroll";
+import { moveElementLeft, moveElementRight } from "./cm/moveElement";
+import { caretAnchor, openPopup } from "@/editor/lsp/popupStore";
 import {
   cursorCodeBlockEnd,
   cursorCodeBlockStart,
   cursorMatchBrace,
   scrollToCenter,
+  selectCodeBlockEnd,
+  selectCodeBlockStart,
   splitLine,
 } from "./cm/caretCommands";
 import { isOverwrite, toggleOverwrite } from "./cm/overwrite";
 import { isColumnMode, toggleColumnMode } from "./cm/columnMode";
+import { cloneCaretAbove, cloneCaretBelow } from "./cm/verticalMotion";
 import { pasteAsPlainText, pasteFromHistory, unwrapAtCaret } from "./extras";
 import { cyclicExpandWord } from "./wordCompletion";
 import { qualifiedReference } from "./copyReference";
@@ -314,6 +323,68 @@ function completeCurrentStatement(view: EditorView, slot: EditorSlot) {
   });
 }
 
+/**
+ * View › Context Info (⌃⇧Q / Alt+Q): the declaration lines around the caret
+ * (class, method, block headers), most useful when they are scrolled away.
+ */
+function showContextInfo(view: EditorView) {
+  const state = view.state;
+  const line = state.doc.lineAt(state.selection.main.head).number;
+  const headers = enclosingHeaders(state, line);
+  const text = headers.map((n) => state.doc.line(n).text.trimEnd()).join("\n");
+  void executeAction("editor.showHint", { text: text || "No context information here" });
+}
+
+/** Navigate › Custom Folding (⌥⌘.): the file's custom regions; picking one moves the caret to it. */
+function showCustomRegions(view: EditorView) {
+  const regions = customRegions(view.state.doc);
+  if (!regions.length) return void executeAction("editor.showHint", { text: "No custom folding regions in this file" });
+  const head = view.state.selection.main.head;
+  openPopup({
+    kind: "list",
+    anchor: caretAnchor(view, head),
+    title: "Custom Folding Regions",
+    items: regions.map((r) => ({
+      id: String(r.startLine),
+      label: r.name || "(no description)",
+      detail: `:${r.startLine}`,
+      icon: "folder",
+      run: () => {
+        const line = view.state.doc.line(Math.min(r.startLine, view.state.doc.lines));
+        const at = line.from + /^\s*/.exec(line.text)![0].length;
+        view.dispatch({
+          selection: { anchor: at },
+          effects: EditorView.scrollIntoView(at, { y: "start", yMargin: 40 }),
+          userEvent: "select.navigate",
+        });
+        view.focus();
+      },
+    })),
+  });
+}
+
+/** Folding › Expand to Level / Expand All to Level (titles kept literal for the text catalog). */
+const FOLD_LEVELS: Array<[number, string, string]> = [
+  [1, "Expand to Level 1", "Expand All to Level 1"],
+  [2, "Expand to Level 2", "Expand All to Level 2"],
+  [3, "Expand to Level 3", "Expand All to Level 3"],
+  [4, "Expand to Level 4", "Expand All to Level 4"],
+  [5, "Expand to Level 5", "Expand All to Level 5"],
+];
+
+function foldLevel(view: EditorView, level: number, all: boolean) {
+  const effects = expandToLevelEffects(view.state, level, all);
+  if (!effects.length) return;
+  // A caret inside a new fold would unfold it again: it moves to the fold's start.
+  const head = view.state.selection.main.head;
+  const hiding = effects
+    .filter((e) => e.is(foldEffect))
+    .map((e) => e.value as { from: number; to: number })
+    .filter((r) => r.from < head && head < r.to)
+    .sort((a, b) => a.from - b.from)[0];
+  view.dispatch({ effects, selection: hiding ? { anchor: hiding.from } : undefined });
+}
+
 // --- cyclic expand word / copy reference ------------------------------------------------
 
 /** Text of the other open documents for Cyclic Expand Word (bounded). */
@@ -425,6 +496,12 @@ export function registerEditorActions(): () => void {
     text("code.deleteLine", "Delete Line", (v) => deleteLine(v)),
     text("code.moveLineUp", "Move Line Up", (v) => moveLineUp(v)),
     text("code.moveLineDown", "Move Line Down", (v) => moveLineDown(v)),
+    text("code.moveElementLeft", "Move Element Left", (v) => moveElementLeft(v), {
+      keywords: ["swap argument", "move parameter"],
+    }),
+    text("code.moveElementRight", "Move Element Right", (v) => moveElementRight(v), {
+      keywords: ["swap argument", "move parameter"],
+    }),
     text("code.moveStatementUp", "Move Statement Up", (v, slot) => moveStatement(v, slot, true)),
     text("code.moveStatementDown", "Move Statement Down", (v, slot) => moveStatement(v, slot, false)),
     text("code.extendSelection", "Extend Selection", (_v, slot) => void queueSelection(slot, extend), {
@@ -490,8 +567,44 @@ export function registerEditorActions(): () => void {
     text("editor.codeBlockEnd", "Move Caret to Code Block End", (v) => cursorCodeBlockEnd(v), {
       category: "Editor Actions",
     }),
-    text("editor.cloneCaretAbove", "Clone Caret Above", (v) => addCursorAbove(v), { category: "Editor Actions" }),
-    text("editor.cloneCaretBelow", "Clone Caret Below", (v) => addCursorBelow(v), { category: "Editor Actions" }),
+    text(
+      "editor.codeBlockStartWithSelection",
+      "Move Caret to Code Block Start with Selection",
+      (v) => selectCodeBlockStart(v),
+      { category: "Editor Actions" },
+    ),
+    text(
+      "editor.codeBlockEndWithSelection",
+      "Move Caret to Code Block End with Selection",
+      (v) => selectCodeBlockEnd(v),
+      {
+        category: "Editor Actions",
+      },
+    ),
+    text("editor.contextInfo", "Context Info", (v) => showContextInfo(v), {
+      category: "View",
+      keywords: ["enclosing method", "enclosing class", "where am I"],
+    }),
+    text("navigate.customRegion", "Custom Folding…", (v) => showCustomRegions(v), {
+      category: "Navigate",
+      keywords: ["region", "editor-fold", "go to region"],
+    }),
+    ...FOLD_LEVELS.flatMap(([level, one, all]) => [
+      text(`code.expandToLevel${level}`, one, (v) => foldLevel(v, level, false), {
+        category: "Folding",
+        keywords: ["unfold", "fold level"],
+      }),
+      text(`code.expandAllToLevel${level}`, all, (v) => foldLevel(v, level, true), {
+        category: "Folding",
+        keywords: ["unfold", "fold level"],
+      }),
+    ]),
+    text("code.collapseBlock", "Fold Code Block", (v) => collapseBlock(v), { category: "Folding", keywords: ["fold"] }),
+    text("code.autoIndentLines", "Auto-Indent Lines", (v) => !v.state.readOnly && indentSelection(v), {
+      keywords: ["reindent", "fix indentation"],
+    }),
+    text("editor.cloneCaretAbove", "Clone Caret Above", (v) => cloneCaretAbove(v), { category: "Editor Actions" }),
+    text("editor.cloneCaretBelow", "Clone Caret Below", (v) => cloneCaretBelow(v), { category: "Editor Actions" }),
     text("editor.matchBrace", "Move Caret to Matching Brace", (v) => cursorMatchBrace(v), {
       category: "Editor Actions",
       // ⌃M is Show Commit Message History in the commit window.
@@ -663,6 +776,8 @@ export function registerEditorActions(): () => void {
       category: "Navigate",
       keywords: ["breadcrumbs"],
       when: "projectOpen",
+      // ⌘↑ / ⌘↓ inside a popup (Search Everywhere's previous / next group) stay with it.
+      keyWhen: "!popupOpen",
       run: () => {
         if (activeSlot()) return openNavBarPopup();
         // No editor: the status bar breadcrumbs (StatusItems › Breadcrumbs) take focus.
@@ -755,6 +870,22 @@ export function registerEditorActions(): () => void {
       run: () => ctrl.split(useTabs.getState().activePane, "column"),
     },
     {
+      id: "editor.nextSplitter",
+      title: "Go to Next Splitter",
+      category: "Window",
+      keywords: ["split", "editor group", "pane"],
+      when: "editorSplit",
+      run: () => ctrl.focusSplitter(1),
+    },
+    {
+      id: "editor.prevSplitter",
+      title: "Go to Previous Splitter",
+      category: "Window",
+      keywords: ["split", "editor group", "pane"],
+      when: "editorSplit",
+      run: () => ctrl.focusSplitter(-1),
+    },
+    {
       id: "editor.moveToOppositeGroup",
       title: "Move to Opposite Group",
       category: "Window",
@@ -771,6 +902,30 @@ export function registerEditorActions(): () => void {
       when: "editorSplit",
       run: async () => {
         await ctrl.unsplit(useTabs.getState().activePane);
+      },
+    },
+    {
+      id: "editor.unsplitAll",
+      title: "Unsplit All",
+      category: "Window",
+      when: "editorSplit",
+      run: () => void ctrl.unsplitAll(useTabs.getState().activePane),
+    },
+    {
+      id: "editor.changeSplitOrientation",
+      title: "Change Splitter Orientation",
+      category: "Window",
+      when: "editorSplit",
+      run: () => ctrl.changeSplitOrientation(useTabs.getState().activePane),
+    },
+    {
+      id: "editor.openInOppositeGroup",
+      title: "Open in Opposite Group",
+      category: "Window",
+      when: TABS_WHEN,
+      run: () => {
+        const t = activePaneTab();
+        if (t) ctrl.openInOpposite(t.paneId, t.tabId);
       },
     },
     {

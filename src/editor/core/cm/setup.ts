@@ -11,6 +11,7 @@ import {
   highlightSpecialChars,
   keymap,
   lineNumbers,
+  tooltips,
 } from "@codemirror/view";
 import {
   bracketMatching,
@@ -44,6 +45,7 @@ import { caretExtension, fontZoom, methodLinesField, prefsExtension, softWrapAct
 import { commentTokens } from "./languages";
 import { multiCaretMouse } from "./multiCaret";
 import { columnModeExtension } from "./columnMode";
+import { visibleGoalColumns } from "./verticalMotion";
 import { tabKeymap } from "./smartKeys";
 import { editorBaseKeymap } from "./baseKeymap";
 import { occurrenceSearch } from "./editing";
@@ -301,8 +303,20 @@ export interface SetupOptions {
   extra?: Extension;
 }
 
+/**
+ * Tooltips (hints, docs, completion) stay below the editor's top edge: one
+ * above the first lines flips below them instead of hiding under the tabs.
+ */
+const tooltipSpace = tooltips({
+  tooltipSpace: (view) => {
+    const top = view.scrollDOM.getBoundingClientRect().top;
+    return { top, left: 0, right: window.innerWidth, bottom: window.innerHeight };
+  },
+});
+
 export function baseExtensions(o: SetupOptions): Extension {
   return [
+    tooltipSpace,
     compartments.font.of(fontExtension(o.settings)),
     openideaTheme,
     compartments.lineNumbers.of(lineNumbersExtension(o.settings)),
@@ -317,6 +331,7 @@ export function baseExtensions(o: SetupOptions): Extension {
     EditorState.allowMultipleSelections.of(true),
     multiCaretMouse,
     columnModeExtension,
+    visibleGoalColumns,
     occurrenceSearch,
     overwriteField,
     gutterLineDrag,
@@ -340,7 +355,7 @@ export function baseExtensions(o: SetupOptions): Extension {
     tabKeymap,
     keymap.of([...closeBracketsKeymap, ...editorBaseKeymap, indentWithTab]),
     compartments.language.of(o.language ?? []),
-    compartments.comments.of(commentTokens(o.info)),
+    compartments.comments.of(commentTokens(o.info, o.ctx.language)),
     compartments.indent.of(indentExtension(o.indent ?? effectiveIndent(o.settings, o.info))),
     compartments.readOnly.of(readOnlyExtension(o.ctx.readOnly)),
     compartments.wrap.of(wrapExtension(o.settings, o.ctx.path, o.wrapOverride)),

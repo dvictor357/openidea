@@ -72,6 +72,12 @@ describe("tab", () => {
     expect(show(v)).toBe("ab  |c\n  |x");
   });
 
+  it("counts wide characters as two columns towards the indent stop", () => {
+    const v = make("a张|x\n张|y");
+    insertTab(v);
+    expect(show(v)).toBe("a张 |x\n张  |y");
+  });
+
   it("inserts a tab character when the code style uses tabs", () => {
     const v = make("a|b", [], "\t");
     insertTab(v);
@@ -95,6 +101,7 @@ describe("smart backspace", () => {
   it("applies in 'proper indent' mode except in indentation-based languages", () => {
     expect(smartBackspaceApplies("autoindent", "java")).toBe(true);
     expect(smartBackspaceApplies("autoindent", "python")).toBe(false);
+    expect(smartBackspaceApplies("autoindent", "gdscript")).toBe(false);
     expect(smartBackspaceApplies("nearest", "java")).toBe(false);
   });
 

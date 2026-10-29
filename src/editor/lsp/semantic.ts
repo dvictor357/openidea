@@ -14,7 +14,9 @@ import { Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate
 import { commands, type SemanticTokens } from "@/platform/ipc";
 import { editorPrefs } from "@/platform/editorSettings";
 import { debounce, docOf, isUnavailable, lspRequest } from "./lsp";
-import { onLspRefresh, serverBackoff } from "./availability";
+import { featureBackoff, onLspRefresh } from "./availability";
+
+const semanticBackoff = featureBackoff();
 
 const TYPE_CLASS: Record<string, string> = {
   type: "type",
@@ -96,12 +98,15 @@ export function semanticRanges(doc: Text, tokens: SemanticTokens, rainbow = fals
     const names: string[] = [];
     for (let b = 0; b < tokenModifiers.length; b++) if (mods & (1 << b)) names.push(tokenModifiers[b]!);
     const classes: string[] = [];
-    let base = TYPE_CLASS[type];
+    let base = Object.hasOwn(TYPE_CLASS, type) ? TYPE_CLASS[type] : undefined;
+    // jdtls marks constructors as a class with a `constructor` modifier; IDEA colours them as methods.
+    if (names.includes("constructor")) base = "function";
     const constant =
       names.includes("constant") || (type === "variable" && names.includes("readonly") && names.includes("static"));
     if (constant && (type === "variable" || type === "property")) base = "constant";
     if (base && base !== "variable") classes.push(`cm-sem-${base}`);
-    for (const n of names) if (MODIFIER_CLASS[n]) classes.push(`cm-sem-${MODIFIER_CLASS[n]}`);
+    // `hasOwn`: servers send names like `constructor` (jdtls) that `Object.prototype` also has.
+    for (const n of names) if (Object.hasOwn(MODIFIER_CLASS, n)) classes.push(`cm-sem-${MODIFIER_CLASS[n]}`);
     if (language === "python" && names.includes("static")) classes.push("cm-sem-python-static");
     const local =
       rainbow &&
@@ -177,14 +182,14 @@ const semanticPlugin = ViewPlugin.fromClass(
     async run() {
       const view = this.view;
       const doc = docOf(view);
-      if (!doc || serverBackoff.active(doc.doc) || !view.dom.isConnected) return;
+      if (!doc || semanticBackoff.active(doc.doc) || !view.dom.isConnected) return;
       const state = view.state;
       try {
         const tokens = await lspRequest(() => commands.lspSemanticTokens(doc.doc));
         if (view.state.doc !== state.doc) return this.refresh();
         this.decorate(state.doc, tokens);
       } catch (e) {
-        if (isUnavailable(e)) serverBackoff.mark(doc.doc);
+        if (isUnavailable(e)) semanticBackoff.mark(doc.doc);
       }
     }
     destroy() {
@@ -197,7 +202,11 @@ const semanticPlugin = ViewPlugin.fromClass(
 
 export function semanticExtension(): Extension {
   // Higher-precedence decoration sources create the *inner* DOM nodes, so this
-  // must outrank Lezer's highlighter (default precedence) for semantic colours
-  // to win; they only set colour / style, never backgrounds.
-  return [semanticField, semanticPlugin, Prec.high(EditorView.decorations.from(semanticField))];
+  // must outrank Lezer's highlighter for semantic colours to win; they only set
+  // colour / style, never backgrounds. `Prec.highest`, not `Prec.high`: the
+  // highlighter (`treeHighlighter` in @codemirror/language) is itself
+  // `Prec.high`, and at equal precedence the later source ends up outside —
+  // its inner span then re-set the colour (a field's `variableName` grey hid
+  // `cm-sem-property`).
+  return [semanticField, semanticPlugin, Prec.highest(EditorView.decorations.from(semanticField))];
 }

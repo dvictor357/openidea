@@ -11,8 +11,12 @@ use tauri::{State, Window};
 /// Detected configs followed by user-defined ones (user ids win on conflict).
 #[tauri::command]
 #[specta::specta]
-pub fn run_configs(window: Window, state: State<'_, AppState>) -> IdeResult<Vec<RunConfig>> {
-    ide_host::ops::run::configs(&state.host, window.label())
+pub async fn run_configs(window: Window, state: State<'_, AppState>) -> IdeResult<Vec<RunConfig>> {
+    // Detection reads build files (and Spring Boot sources): off the command thread.
+    let (host, label) = (state.host.clone(), window.label().to_owned());
+    tauri::async_runtime::spawn_blocking(move || ide_host::ops::run::configs(&host, &label))
+        .await
+        .map_err(|e| ide_core::IdeError::internal(e.to_string()))?
 }
 
 #[tauri::command]
@@ -83,6 +87,17 @@ pub fn run_save_templates(window: Window, state: State<'_, AppState>, templates:
 #[specta::specta]
 pub fn run_system_env(state: State<'_, AppState>) -> std::collections::BTreeMap<String, String> {
     ide_host::ops::run::run_system_env(&state.host, "")
+}
+
+/// Writes the Gradle init script adding `jvm_args` to the JVMs the build forks; returns its path.
+#[tauri::command]
+#[specta::specta]
+pub async fn run_gradle_jvm_args_script(
+    window: Window,
+    state: State<'_, AppState>,
+    jvm_args: Vec<String>,
+) -> IdeResult<String> {
+    ide_host::ops::run::run_gradle_jvm_args_script(&state.host, window.label(), jvm_args).await
 }
 
 /// Results from the JUnit XML reports (Surefire, Failsafe, Gradle) of the module at

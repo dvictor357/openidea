@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EditorController, useTabs } from "./controller";
 import { createMemoryBackend } from "./backend";
 import { findTab, initialTabsState, paneIds } from "./model/tabs";
+import { useDocMeta } from "./model/document";
 import { useProject } from "@/platform/project";
 import { ask } from "@/workbench/messages";
 import type * as Messages from "@/workbench/messages";
@@ -106,6 +107,7 @@ beforeEach(() => {
 afterEach(() => {
   ctrl.stop();
   unregister();
+  useDocMeta.setState({}, true);
   useProject.setState({ project: null, settings: null });
   localStorage.clear();
 });
@@ -343,6 +345,46 @@ describe("custom editor document lifetime", () => {
     expect(findTab(useTabs.getState(), input().key)).not.toBeNull();
     expect(findTab(useTabs.getState(), "other")).toBeNull();
     expect(doc.pending).toBe("new typing");
+  });
+
+  it("Close Read-Only retains a dirty custom document on Cancel and releases it after Discard", async () => {
+    const doc = await open();
+    const pane = useTabs.getState().activePane;
+    useDocMeta.setState({ [input().path!]: { readOnly: true } as never });
+    const cancelled = await ctrl.closeReadOnly(pane);
+    expect(findTab(useTabs.getState(), input().key)).not.toBeNull();
+    expect(doc.text).toBe("edited");
+    expect(doc.closed).toBe(false);
+    expect(cancelled).toBe(false);
+
+    vi.mocked(ask).mockResolvedValueOnce({ button: "discard", checked: false });
+    expect(await ctrl.closeReadOnly(pane)).toBe(true);
+    expect(findTab(useTabs.getState(), input().key)).toBeNull();
+    expect(doc.saved).toBe("original");
+    expect(doc.closed).toBe(true);
+  });
+
+  it("Unsplit All preserves cancelled documents and only releases their last removed view", async () => {
+    const kept = await open();
+    const keepPane = useTabs.getState().activePane;
+    ctrl.split(keepPane, "row");
+    const removedPane = useTabs.getState().activePane;
+    const removed = await open("removed");
+
+    const cancelled = await ctrl.unsplitAll(keepPane);
+    expect(paneIds(useTabs.getState())).toContain(removedPane);
+    expect(findTab(useTabs.getState(), input("removed").key)).not.toBeNull();
+    expect(removed.text).toBe("edited");
+    expect(removed.closed).toBe(false);
+    expect(cancelled).toBe(false);
+
+    vi.mocked(ask).mockResolvedValueOnce({ button: "discard", checked: false });
+    expect(await ctrl.unsplitAll(keepPane)).toBe(true);
+    expect(paneIds(useTabs.getState())).toEqual([keepPane]);
+    expect(removed.saved).toBe("original");
+    expect(removed.closed).toBe(true);
+    expect(kept.text).toBe("edited");
+    expect(kept.closed).toBe(false);
   });
 
   it("prepares hidden documents, deduplicates split state, and resumes after a failed project transition", async () => {

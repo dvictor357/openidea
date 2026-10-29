@@ -3,8 +3,10 @@
  * while suspended, hovering an expression (or the selection under the mouse)
  * evaluates it in the selected frame.
  */
-import type { Extension } from "@codemirror/state";
-import { hoverTooltip, type EditorView } from "@codemirror/view";
+import type { EditorState, Extension } from "@codemirror/state";
+import type { DebugSessionId, Variable } from "@/bindings";
+import { hoverTooltip, ViewPlugin, type EditorView, type ViewUpdate } from "@codemirror/view";
+import { showHint } from "@/editor/lsp/hint";
 import { workflowSettings } from "@/platform/workflowSettings";
 import { navigationModifierHeld } from "@/platform/navigationModifier";
 import { activeSession, evaluate } from "../state";
@@ -37,6 +39,46 @@ export function expressionAt(view: EditorView, pos: number): { from: number; to:
   return { from: line.from + start, to: line.from + end, text };
 }
 
+/** IDEA's value hint: `expression = value {type}`, objects expandable into a variables tree in place. */
+export function valueHint(
+  expression: string,
+  value: Variable,
+  session: DebugSessionId,
+): { dom: HTMLElement; destroy: () => void } {
+  const dom = document.createElement("div");
+  dom.className = `${styles.valueTooltip} ${selectableText}`;
+  let tree: { unmount(): void } | null = null;
+  if (value.variablesReference > 0) {
+    // IDEA's value hint: the "+" expands the object into a variables tree in place.
+    const expand = document.createElement("button");
+    expand.type = "button";
+    expand.className = styles.valueExpand!;
+    expand.setAttribute("aria-label", tx("Expand value"));
+    expand.setAttribute("aria-expanded", "false");
+    expand.innerHTML = iconMarkup("chevron-right", 12) ?? "";
+    expand.addEventListener("mousedown", (e) => e.preventDefault());
+    expand.addEventListener("click", () => {
+      if (tree) return;
+      expand.remove();
+      dom.classList.replace(selectableText, styles.valueTooltipTree!);
+      dom.replaceChildren();
+      tree = mountValueTree(dom, expression, value, session);
+    });
+    dom.append(expand);
+  }
+  const name = document.createElement("span");
+  name.className = styles.valueName!;
+  name.textContent = `${expression} = `;
+  dom.append(name, inlineValue(value.value, 400));
+  if (value.typeName) {
+    const type = document.createElement("span");
+    type.className = styles.valueType!;
+    type.textContent = `  {${value.typeName}}`;
+    dom.append(type);
+  }
+  return { dom, destroy: () => tree?.unmount() };
+}
+
 export function valueTooltip(): Extension {
   return hoverTooltip(
     async (view, pos) => {
@@ -61,41 +103,66 @@ export function valueTooltip(): Extension {
         end: expr.to,
         above: true,
         create: () => {
-          const dom = document.createElement("div");
-          dom.className = `${styles.valueTooltip} ${selectableText}`;
-          let tree: { unmount(): void } | null = null;
-          if (value.variablesReference > 0) {
-            // IDEA's value hint: the "+" expands the object into a variables tree in place.
-            const expand = document.createElement("button");
-            expand.type = "button";
-            expand.className = styles.valueExpand!;
-            expand.setAttribute("aria-label", tx("Expand value"));
-            expand.setAttribute("aria-expanded", "false");
-            expand.innerHTML = iconMarkup("chevron-right", 12) ?? "";
-            expand.addEventListener("mousedown", (e) => e.preventDefault());
-            expand.addEventListener("click", () => {
-              if (tree) return;
-              expand.remove();
-              dom.classList.replace(selectableText, styles.valueTooltipTree!);
-              dom.replaceChildren();
-              tree = mountValueTree(dom, expr.text, value, session.id);
-            });
-            dom.append(expand);
-          }
-          const name = document.createElement("span");
-          name.className = styles.valueName!;
-          name.textContent = `${expr.text} = `;
-          dom.append(name, inlineValue(value.value, 400));
-          if (value.typeName) {
-            const type = document.createElement("span");
-            type.className = styles.valueType!;
-            type.textContent = `  {${value.typeName}}`;
-            dom.append(type);
-          }
-          return { dom, destroy: () => tree?.unmount() };
+          return valueHint(expr.text, value, session.id);
         },
       };
     },
     { hoverTime: BASE_HOVER },
+  );
+}
+
+const SELECTION_DELAY = 400;
+const MAX_SELECTION = 200;
+
+/** The selected text when it can be evaluated: one non-blank line, not too long. */
+export function selectionExpression(state: EditorState): { from: number; text: string } | null {
+  const sel = state.selection;
+  if (sel.ranges.length !== 1 || sel.main.empty) return null;
+  const text = state.sliceDoc(sel.main.from, sel.main.to).trim();
+  if (!text || text.length > MAX_SELECTION || text.includes("\n")) return null;
+  return { from: sel.main.from, text };
+}
+
+/**
+ * Settings › Debugger › Data Views › "Show value tooltip on code selection": while
+ * suspended, selecting an expression shows its value once the selection settles.
+ */
+export function selectionValueTooltip(): Extension {
+  return ViewPlugin.fromClass(
+    class {
+      private timer: ReturnType<typeof setTimeout> | undefined;
+      private seq = 0;
+      constructor(readonly view: EditorView) {}
+
+      update(u: ViewUpdate) {
+        if (!u.selectionSet) return;
+        clearTimeout(this.timer);
+        this.seq++;
+        if (!u.transactions.some((tr) => tr.isUserEvent("select"))) return;
+        const seq = this.seq;
+        this.timer = setTimeout(() => void this.show(seq), SELECTION_DELAY);
+      }
+
+      private async show(seq: number) {
+        if (!workflowSettings().debugger.valueTooltipOnSelection) return;
+        const session = activeSession();
+        if (!session || session.status !== "paused") return;
+        const expr = selectionExpression(this.view.state);
+        if (!expr) return;
+        let value;
+        try {
+          value = await evaluate(expr.text, "hover", session);
+        } catch {
+          return;
+        }
+        // The selection moved on while evaluating.
+        if (seq !== this.seq) return;
+        showHint(this.view, () => valueHint(expr.text, value, session.id), { pos: expr.from, timeout: 60_000 });
+      }
+
+      destroy() {
+        clearTimeout(this.timer);
+      }
+    },
   );
 }
