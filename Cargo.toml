@@ -96,6 +96,9 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls-no-p
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-platform-verifier = "0.7"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "sqlite", "postgres", "mysql"] }
+tiberius = { version = "0.12", default-features = false, features = ["tds73", "rustls", "sql-browser-tokio"] }
+bb8 = "0.9"
+bb8-tiberius = { version = "0.16", default-features = false, features = ["tds73", "tls", "with-tokio", "sql-browser"] }
 uuid = { version = "1", features = ["v4"] }
 
 # testing
