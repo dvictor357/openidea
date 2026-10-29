@@ -47,18 +47,28 @@ both sides. Both are measured from the outside, the same way: see
 
 ## Jupyter notebooks
 
-Open `.ipynb` files as virtualized Markdown, Python and raw cells, with stored outputs.
-Use **Run Cell** or **Run All**, choose a Python interpreter, and interrupt or restart
-the notebook's persistent local kernel from the toolbar. The selected environment
+Open `.ipynb` files directly in LightEdit or from a project. Python and Markdown
+cells are editable in a virtualized cell list; raw and unknown cells are displayed
+read-only and preserved on save.
+
+Run Python code with **Run Cell** or **Run All**, choose a Python interpreter, and
+interrupt or restart the notebook's persistent local kernel from the toolbar. The selected environment
 needs `ipykernel` (`python -m pip install ipykernel`); no Jupyter server is required.
 Opening or saving a notebook never runs its cells.
+With a Python code cell focused, **Shift+Enter** runs that cell.
 
 Save, undo/redo, split editors and unsaved-change prompts share one notebook document.
+Split views share a kernel; closing its last view or switching projects stops it.
 An unchanged notebook saves byte-for-byte, including its original formatting and
 unknown fields; external file changes are reported rather than overwritten.
-Text, tracebacks and images render inline. HTML tables use an isolated static sandbox;
-JavaScript remains inert. Remote kernels, interactive widgets and notebook LSP/debugging
-are not supported.
+Text, tracebacks, PNG/JPEG images and sanitized SVG render inline. HTML is sanitized
+and shown in a static sandboxed iframe. JavaScript outputs are displayed as inert
+source in that sandbox, not executed; the IDE-wide Content Security Policy is not
+relaxed for notebook outputs.
+
+Script-dependent interactive outputs (such as widgets or interactive Plotly/Bokeh
+charts) are not supported. Remote Jupyter connections, a variable explorer,
+notebook language-server features and cell debugging are also not supported.
 
 ## Build
 
