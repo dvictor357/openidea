@@ -778,6 +778,7 @@ export class EditorController implements SlotHost {
       Object.values(s.panes).some((p) => p.tabs.length > 0),
     );
     setContext("editorSplit", paneIds(s).length > 1);
+    setContext("editorTextFocus", !!slot?.view?.hasFocus);
     setContext("textEditorActive", !!slot);
   }
 
@@ -1711,11 +1712,6 @@ let controller: EditorController | null = null;
 
 export function editorController(): EditorController {
   return (controller ??= new EditorController());
-}
-
-/** Test hook. */
-export function _setEditorController(c: EditorController | null) {
-  controller = c;
 }
 
 /** "Finder" / "Explorer" / "Files", like IDEA's Open In submenu. */

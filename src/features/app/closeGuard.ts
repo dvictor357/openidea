@@ -205,9 +205,3 @@ export function installCloseGuard(deps: CloseDeps = defaultDeps): () => void {
     unsubs.forEach((u) => u());
   };
 }
-
-/** Tests only. */
-export function _setDirtyForTests(ids: number[]) {
-  dirtyDocs.clear();
-  ids.forEach((i) => dirtyDocs.add(i));
-}

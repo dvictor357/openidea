@@ -213,6 +213,7 @@ pub fn builder() -> tauri_specta::Builder<tauri::Wry> {
         vcs::vcs_branches,
         vcs::vcs_stashes,
         vcs::vcs_stage,
+        vcs::vcs_add_to_ignore,
         vcs::vcs_unstage,
         vcs::vcs_stage_patch,
         vcs::vcs_discard,
